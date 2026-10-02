@@ -154,6 +154,9 @@ const setHidden = async ($: $, fn: (ids: string[]) => string[]) => {
 
 type AnyElements = Elements['terminal'] | Elements['desktop']
 
+// The engine draws `[-]` at the band's top-right corner, over whatever is there.
+const ENGINE_MARK_CELLS = 4
+
 type Layout = { surface: 'terminal' | 'desktop'; grid: RowGrid }
 
 type ProgressRow = RowSpec & { onHide: () => void }
@@ -330,10 +333,14 @@ export const register: Register = on => {
       <Button key="toggle" hotkey="e" plain dimColor label={label} onPress={() => toggleExpanded($)} />
     )
 
-    if (!(await read($, isExpanded)) || maxRows < 2) {
+    // In the terminal a blank row above sets the band apart from the transcript, while the
+    // band has the rows to spare.
+    const gap = e.surface === 'terminal' && maxRows >= 3 ? 1 : 0
+
+    if (!(await read($, isExpanded)) || maxRows - gap < 2) {
       const parts = summaryParts(rows)
       return (
-        <Box flexDirection="row" gap={1}>
+        <Box flexDirection="row" gap={1} marginTop={gap}>
           <Text color={ORANGE}>{MARK}</Text>
           <Text wrap="truncate">
             {parts.flatMap((part, index) => (index === 0 ? [part] : [<Text dimColor> · </Text>, part]))}
@@ -343,16 +350,18 @@ export const register: Register = on => {
       )
     }
 
-    const shown = rows.slice(0, maxRows - 1)
+    const shown = rows.slice(0, maxRows - gap - 1)
     // The desktop has no cells; its rows are drawn on a grid of CELL_PX that fills the band.
-    const cells = e.surface === 'desktop' ? Math.floor(Math.min(1100, Math.max(360, bodyColumns * 7.6 - 60)) / CELL_PX) : bodyColumns - 2
+    // The terminal leaves the band's last columns to the engine's [-] collapse mark.
+    const cells =
+      e.surface === 'desktop' ? Math.floor(Math.min(1100, Math.max(360, bodyColumns * 7.6 - 60)) / CELL_PX) : bodyColumns - 2 - ENGINE_MARK_CELLS
     const layout: Layout = { surface: e.surface, grid: rowGrid(shown, cells) }
 
     const more = rows.length - shown.length
     const hideRow = (id: string) => () => setHidden($, list => [...list, id])
 
     return (
-      <Box flexDirection="column">
+      <Box flexDirection="column" marginTop={gap}>
         {shown.map(row => progressRow(elements, { ...row, onHide: hideRow(row.id) }, layout))}
         <Box flexDirection="row" gap={1}>
           {more > 0 && <Text dimColor>+{more} more</Text>}

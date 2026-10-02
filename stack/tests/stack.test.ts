@@ -66,6 +66,15 @@ const turn = ($: Engine) =>
 const command = ($: Engine, args: string) =>
   $.command.run({ command: 'stack', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 110 } })
 
+// How many cells a drawn element takes: its strings and any Button's label.
+const cellsOf = (node: unknown): number => {
+  if (typeof node === 'string') return node.length
+  if (node === null || typeof node !== 'object') return 0
+  const { props, children = [] } = node as { props?: { label?: unknown }; children?: unknown[] }
+  const label = typeof props?.label === 'string' ? props.label.length : 0
+  return label + children.reduce<number>((cells, child) => cells + cellsOf(child), 0)
+}
+
 const todos = (...statuses: string[]) =>
   statuses.map((status, index) => ({ content: `task ${index}`, activeForm: `doing ${index}`, status }))
 
@@ -183,6 +192,28 @@ describe('stack', () => {
     expect(source.indexOf('<use href="#b')).toBeLessThan(source.indexOf('fill="#B5532F"'))
   })
 
+  test('in the terminal a blank row sets the band apart and the corner is left to the [-] mark', async ($, on) => {
+    mock.clock(on, { now: OCT_2 })
+    memoryStore(on)
+    world(on, { rateLimits: [{ kind: 'five_hour', percentUsed: 19 }] })
+    await start($)
+
+    for (const isExpanded of [false, true]) {
+      if (isExpanded) await command($, 'expand')
+      const terminal = await $.ui.mount(band('terminal'))
+      expect(await terminal.drawn()).toMatchObject({ props: { marginTop: 1 } })
+      await terminal.unmount()
+      const desktop = await $.ui.mount(band('desktop'))
+      expect(await desktop.drawn()).toMatchObject({ props: { marginTop: 0 } })
+      await desktop.unmount()
+    }
+
+    const ui = await $.ui.mount(band('terminal'))
+    const row = (await ui.findAll({ type: 'Box' })).find(box => box.key === 'row:session')
+    expect(cellsOf(row)).toBeGreaterThan(0)
+    expect(cellsOf(row)).toBeLessThanOrEqual(110 - 4)
+  })
+
   test('each turn adds the cost delta to this month and the bar compares it to last month', async ($, on) => {
     mock.clock(on, { now: OCT_2 })
     const store = memoryStore(on, { 'costs.2026-09': 4.5 })
@@ -233,8 +264,9 @@ describe('stack', () => {
     await $.tool.call({ tool: 'TodoWrite', todos: todos('pending') } as never)
     await command($, 'expand')
 
+    // Three rows: the blank row above, one bar, and the line that says what is left out.
     const tight = await $.ui.mount(band('terminal', 3))
-    expect(await tight.find({ type: 'Text', text: '+2 more' })).toBeDefined()
+    expect(await tight.find({ type: 'Text', text: '+3 more' })).toBeDefined()
     await tight.unmount()
 
     expect((await command($, 'hide limits'))?.text).toBe('Hid limits.')
