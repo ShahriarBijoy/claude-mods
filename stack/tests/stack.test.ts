@@ -266,6 +266,21 @@ describe('stack', () => {
     expect((await ui.find({ type: 'Svg' }))?.props.alt).toBe('October so far: $38.20 / Sep $62.40, 61%')
   })
 
+  test('spend after the ccusage snapshot adds to it, so the month keeps counting', async ($, on) => {
+    const clock = mock.clock(on, { now: OCT_2 })
+    const store = memoryStore(on, { 'costs.2026-10': 1 })
+    const state = world(on, { usd: 0, ccusage: JSON.stringify({ monthly: [{ period: '2026-10', totalCost: 38.2 }] }) })
+    await start($)
+    await clock.advance(1000)
+    state.usd = 2
+    await turn($)
+
+    expect((store['ccusage'] as { months: Record<string, number> }).months['2026-10']).toBe(40.2)
+    await command($, 'expand')
+    const ui = await $.ui.mount(band('terminal'))
+    expect(await ui.find({ type: 'Text', text: ' $40.20 ' })).toBeDefined()
+  })
+
   test('a blocked ccusage run is reported by /stack', async ($, on) => {
     const clock = mock.clock(on, { now: OCT_2 })
     const store = memoryStore(on)

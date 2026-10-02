@@ -90,10 +90,18 @@ const recordCost = async ($: $) => {
     return cost
   })
   if (delta <= 0) return
-  const key = `${COST_PREFIX}${monthKey(await $.clock.now())}`
+  const month = monthKey(await $.clock.now())
+  const key = `${COST_PREFIX}${month}`
   const total = Number((await $.store.get(key)) ?? 0) + delta
   await $.store.set(key, total)
-  await update($, tracked, months => ({ ...months, [key.slice(COST_PREFIX.length)]: total }))
+  await update($, tracked, months => ({ ...months, [month]: total }))
+  // ccusage is run at most every 12 hours, and its figure for this month stops there:
+  // spend since then is new to it, so it carries on from the snapshot.
+  const cache = (await $.store.get(CCUSAGE_KEY)) as CcusageCache | undefined
+  if (!cache?.months) return
+  const months = { ...cache.months, [month]: (cache.months[month] ?? 0) + delta }
+  await $.store.set(CCUSAGE_KEY, { ...cache, months } satisfies CcusageCache)
+  await update($, backfill, () => months)
 }
 
 const loadStore = async ($: $) => {
