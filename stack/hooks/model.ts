@@ -1,7 +1,11 @@
 import type { StackAgent, StackLimit, StackTask } from '../types'
 
-// Claude's clay, with warm warning colours for limits running out.
-export const TONES = { accent: '#D97757', warn: '#E0A84E', danger: '#E5534B' } as const
+// Claude's orange: the dither and the dots in its light clay, the pill in its deeper crail.
+export const ORANGE = '#D97757'
+export const PILL_BG = '#B5532F'
+export const PILL_FG = '#FFF4EC'
+// A limit close to running out shows its percentage in amber, then red.
+export const TONES = { accent: ORANGE, warn: '#E0A84E', danger: '#E5534B' } as const
 export const MARK = '✻'
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
@@ -14,15 +18,15 @@ export type Tone = keyof typeof TONES
 export type RowSpec = {
   id: string
   label: string
-  // null: no known total (a subagent), drawn as a marker that moves with each tool call.
+  // null: no known total (a subagent), drawn as a dither run that moves with each tool call.
   percent: number | null
-  value: string
-  detail: string
-  tone: Tone
-  // A bar of `steps` segments with `done` filled, the next one half-lit while `isStepActive`.
+  pill: string
+  // The right-hand column: a percentage, or a subagent's call count.
+  right: string
+  // What the collapsed one-line summary says for this row; '' for none.
+  summary: string
   steps: number
-  done: number
-  isStepActive: boolean
+  tone: Tone
   phase: number
 }
 
@@ -94,36 +98,28 @@ export const toolDetail = (tool: string, args: Record<string, unknown>): string 
   return oneLine(subject ? `${shortTool(tool)} ${subject}` : shortTool(tool), 48)
 }
 
-const blank = { steps: 0, done: 0, isStepActive: false, phase: 0, tone: 'accent' as Tone }
+const percentRight = (percent: number): string => `${Math.round(percent)}%`
 
 export const buildRows = (data: StackData, now: number): RowSpec[] => {
   const rows: RowSpec[] = []
+  const base = { steps: 0, tone: 'accent' as Tone, phase: 0 }
 
   if (data.tasks.length > 0) {
     const done = data.tasks.filter(task => task.status === 'completed').length
-    const active = data.tasks.find(task => task.status === 'in_progress')
-    const next = data.tasks.find(task => task.status === 'pending')
-    rows.push({
-      ...blank,
-      id: 'tasks',
-      label: 'Tasks',
-      percent: (done / data.tasks.length) * 100,
-      value: `${done}/${data.tasks.length}`,
-      detail: active ? active.activeForm || active.subject : next ? `Next: ${next.subject}` : 'All done',
-      steps: data.tasks.length,
-      done,
-      isStepActive: active !== undefined,
-    })
+    const percent = (done / data.tasks.length) * 100
+    const pill = `Tasks ${done}/${data.tasks.length}`
+    rows.push({ ...base, id: 'tasks', label: 'Tasks', percent, pill, right: percentRight(percent), summary: pill, steps: data.tasks.length })
   }
 
   for (const [id, agent] of Object.entries(data.agents)) {
     rows.push({
-      ...blank,
+      ...base,
       id: `agent:${id}`,
       label: agent.label,
       percent: null,
-      value: `${agent.calls} ${agent.calls === 1 ? 'call' : 'calls'}`,
-      detail: agent.detail ?? shortTool(agent.tool),
+      pill: agent.detail ?? shortTool(agent.tool),
+      right: `${agent.calls} ${agent.calls === 1 ? 'call' : 'calls'}`,
+      summary: '',
       phase: agent.calls,
     })
   }
@@ -131,12 +127,13 @@ export const buildRows = (data: StackData, now: number): RowSpec[] => {
   for (const limit of data.limits) {
     const meta = limitRow(limit.kind)
     rows.push({
-      ...blank,
+      ...base,
       id: meta.id,
       label: meta.label,
       percent: limit.percentUsed,
-      value: `${Math.round(limit.percentUsed)}%`,
-      detail: `resets ${formatReset(limit.resetsAt, now)}`,
+      pill: formatReset(limit.resetsAt, now),
+      right: percentRight(limit.percentUsed),
+      summary: `${meta.short} ${percentRight(limit.percentUsed)}`,
       tone: limitTone(limit.percentUsed),
     })
   }
@@ -148,12 +145,13 @@ export const buildRows = (data: StackData, now: number): RowSpec[] => {
   if (thisMonth > 0 || lastMonth > 0) {
     const percent = lastMonth > 0 ? (thisMonth / lastMonth) * 100 : 100
     rows.push({
-      ...blank,
+      ...base,
       id: 'costs',
       label: `${MONTHS_LONG[monthIndex(thisKey)]} so far`,
       percent,
-      value: usd(thisMonth),
-      detail: lastMonth > 0 ? `${Math.round(percent)}% of ${MONTHS[monthIndex(lastKey)]} · ${usd(lastMonth)}` : 'no spend last month',
+      pill: lastMonth > 0 ? `${usd(thisMonth)} / ${MONTHS[monthIndex(lastKey)]} ${usd(lastMonth)}` : usd(thisMonth),
+      right: percentRight(percent),
+      summary: `${MONTHS[monthIndex(thisKey)]} ${usd(thisMonth)}`,
       tone: percent > 100 ? 'warn' : 'accent',
     })
   }
@@ -162,15 +160,9 @@ export const buildRows = (data: StackData, now: number): RowSpec[] => {
 }
 
 export const summaryParts = (rows: RowSpec[]): string[] => {
-  const parts: string[] = []
   const agents = rows.filter(row => row.id.startsWith('agent:')).length
-  if (agents > 0) parts.push(`${agents} ${agents === 1 ? 'agent' : 'agents'}`)
-  for (const row of rows) {
-    const limit = Object.values(LIMIT_ROWS).find(meta => meta.id === row.id)
-    if (row.id === 'tasks') parts.unshift(`Tasks ${row.value}`)
-    else if (limit) parts.push(`${limit.short} ${row.value}`)
-    else if (row.id === 'costs') parts.push(`${row.label.split(' ')[0]?.slice(0, 3)} ${row.value}`)
-  }
+  const parts = rows.filter(row => row.summary !== '').map(row => row.summary)
+  if (agents > 0) parts.splice(rows[0]?.id === 'tasks' ? 1 : 0, 0, `${agents} ${agents === 1 ? 'agent' : 'agents'}`)
   return parts
 }
 
@@ -195,145 +187,128 @@ export const isHidden = (id: string, hidden: readonly string[]): boolean =>
 export const fit = (text: string, cells: number): string =>
   text.length > cells ? `${text.slice(0, Math.max(0, cells - 1))}…` : text.padEnd(cells)
 
-// Terminal bar --------------------------------------------------------------
+// The row grid ----------------------------------------------------------------
 
-export type SegmentKind = 'fill' | 'active' | 'track' | 'gap'
-export type Segment = { kind: SegmentKind; text: string }
+// ● label  ⣿⣷⡿ pill ····│····  40% ×, in character cells. Both surfaces draw this grid:
+// the terminal as text, the desktop as an image in a monospaced font.
+export type RowGrid = { labelCells: number; trackCells: number; rightCells: number }
 
-const FILLED = '━'
-const EMPTY = '─'
+export const rowGrid = (rows: RowSpec[], cells: number): RowGrid => {
+  const labelCells = Math.min(22, Math.max(0, ...rows.map(row => row.label.length)))
+  const rightCells = Math.max(4, ...rows.map(row => row.right.length))
+  // 2 for the dot, 2 after the label, 1 before and 1 after the right column.
+  return { labelCells, rightCells, trackCells: Math.max(10, cells - 2 - labelCells - 2 - 1 - rightCells - 1) }
+}
 
-const percentCells = (percent: number, cells: number): number =>
-  percent > 0 ? Math.max(1, Math.round((cells * Math.min(100, percent)) / 100)) : 0
+export type SegmentKind = 'fill' | 'pill' | 'empty' | 'tickFill' | 'tickEmpty'
+export type Segment = { kind: SegmentKind; text: string; start: number }
 
-// A thin line: heavy where it is filled, light where it is not. Steps split it into segments
-// with a gap between; no known total draws a short heavy marker that moves on each tool call.
-export const terminalBar = (row: RowSpec, cells: number): Segment[] => {
-  const kinds: SegmentKind[] = new Array(cells).fill('track')
-  const gap = 1
-  const segmentCells = row.steps > 1 ? (cells - gap * (row.steps - 1)) / row.steps : 0
+// Mostly full cells, with a dot missing here and there: the texture of the reference.
+const BRAILLE = ['⣿', '⣿', '⣿', '⣷', '⡿', '⣿', '⡷', '⣾']
 
+const hash = (text: string): number =>
+  [...text].reduce((sum, char) => Math.imul(sum ^ char.charCodeAt(0), 16777619), 2166136261)
+
+// The top bits of a multiplicative hash: the low ones of cell × odd repeat every few cells.
+const dither = (cell: number, seed: number): string =>
+  BRAILLE[(Math.imul(cell + 1, 2654435761) ^ seed) >>> 29] ?? '⣿'
+
+// The braille dither up to the progress point, the pill ending at it (or just after it, while
+// the fill is too short to show around the pill), a tick at each step boundary and a dim dot
+// for every empty cell. With no known total, a short dither run moves along with the pill.
+export const terminalTrack = (row: RowSpec, cells: number): Segment[] => {
+  const text = row.pill.length > cells - 4 ? `${row.pill.slice(0, Math.max(1, cells - 5))}…` : row.pill
+  const pill = ` ${text} `
+  let fillStart = 0
+  let fillEnd = 0
   if (row.percent === null) {
-    const block = Math.max(3, Math.round(cells / 6))
-    const start = ((row.phase * 3) % (cells + block)) - block
-    for (let cell = Math.max(0, start); cell < Math.min(cells, start + block); cell++) kinds[cell] = 'fill'
-  } else if (segmentCells >= 2) {
-    for (let step = 0; step < row.steps; step++) {
-      const from = Math.round(step * (segmentCells + gap))
-      const to = Math.round(step * (segmentCells + gap) + segmentCells)
-      const kind: SegmentKind = step < row.done ? 'fill' : step === row.done && row.isStepActive ? 'active' : 'track'
-      for (let cell = from; cell < to && cell < cells; cell++) kinds[cell] = kind
-      if (step < row.steps - 1 && to < cells) kinds[to] = 'gap'
-    }
-  } else {
-    for (let cell = 0; cell < percentCells(row.percent, cells); cell++) kinds[cell] = 'fill'
+    const run = Math.max(3, Math.round(cells / 10))
+    const room = Math.max(1, cells - run - pill.length + 1)
+    fillStart = (row.phase * 3) % room
+    fillEnd = fillStart + run
+  } else if (row.percent > 0) {
+    fillEnd = Math.max(1, Math.round((cells * Math.min(100, row.percent)) / 100))
   }
+  const isPillInside = fillEnd - fillStart >= pill.length + 2
+  const pillStart = Math.min(isPillInside ? fillEnd - pill.length : fillEnd, cells - pill.length)
+  const ticks = new Set<number>()
+  for (let i = 1; i < row.steps; i++) ticks.add(Math.round((cells * i) / row.steps))
+  const seed = hash(row.id)
 
   const segments: Segment[] = []
-  for (const kind of kinds) {
-    const char = kind === 'gap' ? ' ' : kind === 'track' ? EMPTY : FILLED
+  const push = (kind: SegmentKind, char: string, cell: number) => {
     const last = segments[segments.length - 1]
     if (last?.kind === kind) last.text += char
-    else segments.push({ kind, text: char })
+    else segments.push({ kind, text: char, start: cell })
+  }
+  for (let cell = 0; cell < cells; cell++) {
+    const isFill = cell >= fillStart && cell < fillEnd
+    if (cell >= pillStart && cell < pillStart + pill.length) push('pill', pill[cell - pillStart] ?? ' ', cell)
+    else if (ticks.has(cell)) push(isFill ? 'tickFill' : 'tickEmpty', '│', cell)
+    else if (isFill) push('fill', dither(cell, seed), cell)
+    else push('empty', '·', cell)
   }
   return segments
 }
 
-// Desktop row ---------------------------------------------------------------
+// Desktop row -----------------------------------------------------------------
 
-export const ROW_PX = 30
-const BAR_PX = 6
-
-export type DesktopColumns = { widthPx: number; labelPx: number; barPx: number; valuePx: number; detailPx: number }
-
-const LABEL_CH = 7.6
-const VALUE_CH = 7.2
-const DETAIL_CH = 6.8
-const GUTTER = 16
-
-export const desktopColumns = (rows: RowSpec[], widthPx: number): DesktopColumns => {
-  const longest = (pick: (row: RowSpec) => string) => Math.max(0, ...rows.map(row => pick(row).length))
-  const labelPx = Math.min(240, Math.max(96, Math.round(longest(row => row.label) * LABEL_CH) + GUTTER))
-  const valuePx = Math.round(longest(row => row.value) * VALUE_CH) + 4
-  let detailPx = Math.min(280, Math.round(longest(row => row.detail) * DETAIL_CH))
-  let barPx = widthPx - labelPx - GUTTER - valuePx - GUTTER - detailPx
-  if (barPx < 140) {
-    detailPx = 0
-    barPx = widthPx - labelPx - GUTTER - valuePx
-  }
-  return { widthPx, labelPx, barPx: Math.max(60, barPx), valuePx, detailPx }
-}
+export const CELL_PX = 8.4
+export const ROW_PX = 26
+const FONT_PX = 14
 
 const escapeXml = (text: string): string =>
   text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
-const clip = (text: string, px: number, ch: number): string => {
-  const fitsChars = Math.floor(px / ch)
-  return text.length > fitsChars ? `${text.slice(0, Math.max(0, fitsChars - 1))}…` : text
+// One braille character as its dots: the low byte of its code point is one bit per dot,
+// dots 1-3 and 7 down the left column, 4-6 and 8 down the right.
+const BRAILLE_DOTS: Array<[number, number]> = [[0, 0], [0, 1], [0, 2], [1, 0], [1, 1], [1, 2], [0, 3], [1, 3]]
+
+const brailleSymbol = (char: string): string => {
+  const bits = (char.codePointAt(0) ?? 0x2800) - 0x2800
+  const dots = BRAILLE_DOTS.filter((_, bit) => bits & (1 << bit)).map(
+    ([column, row]) => `<rect x="${(1.6 + column * 3.4).toFixed(1)}" y="${(-7 + row * 4).toFixed(1)}" width="2" height="2" rx="0.5"/>`,
+  )
+  return `<g id="b${char.codePointAt(0)}" class="fill">${dots.join('')}</g>`
 }
 
-const desktopBar = (row: RowSpec, x: number, width: number, y: number): string[] => {
-  const color = TONES[row.tone]
-  const pill = (px: number, w: number, fill: string, extra = '') =>
-    `<rect x="${px.toFixed(1)}" y="${y}" width="${Math.max(0, w).toFixed(1)}" height="${BAR_PX}" rx="${BAR_PX / 2}" fill="${fill}"${extra}/>`
+// The terminal's grid as an image: each run of characters is pinned to its cells with
+// textLength, so the braille, the dots and the pill line up as they do in a terminal.
+export const desktopRowSvg = (row: RowSpec, grid: RowGrid): string => {
+  const cells = 2 + grid.labelCells + 2 + grid.trackCells + 1 + grid.rightCells
+  const width = Math.ceil(cells * CELL_PX)
+  const mid = ROW_PX / 2
+  const trackX = (2 + grid.labelCells + 2) * CELL_PX
+  const run = (x: number, text: string, cls: string) =>
+    `<text class="${cls}" x="${x.toFixed(1)}" y="${mid}" textLength="${(text.length * CELL_PX).toFixed(1)}" lengthAdjust="spacingAndGlyphs" dominant-baseline="central" xml:space="preserve">${escapeXml(text)}</text>`
 
-  const track = `<rect class="track" x="${x}" y="${y}" width="${width}" height="${BAR_PX}" rx="${BAR_PX / 2}"/>`
-
-  // No known total: a soft marker sweeps the track. Where the surface does not animate the
-  // image, it rests where the tool-call count puts it, so it still moves as the agent works.
-  if (row.percent === null) {
-    const block = Math.max(28, width * 0.18)
-    const start = x + ((row.phase * 37) % Math.max(1, width - block))
-    return [
-      track,
-      `<clipPath id="bar"><rect x="${x}" y="${y}" width="${width}" height="${BAR_PX}" rx="${BAR_PX / 2}"/></clipPath>`,
-      `<g clip-path="url(#bar)"><rect x="${start.toFixed(1)}" y="${y}" width="${block.toFixed(1)}" height="${BAR_PX}" rx="${BAR_PX / 2}" fill="url(#sweep)">`,
-      `<animate attributeName="x" values="${(x - block).toFixed(1)};${(x + width).toFixed(1)}" dur="1.8s" repeatCount="indefinite"/></rect></g>`,
-    ]
-  }
-
-  if (row.steps > 1 && width / row.steps >= 8) {
-    const gap = 3
-    const segment = (width - gap * (row.steps - 1)) / row.steps
-    return Array.from({ length: row.steps }, (_, step) => {
-      const sx = x + step * (segment + gap)
-      if (step < row.done) return pill(sx, segment, color)
-      if (step === row.done && row.isStepActive) return pill(sx, segment, color, ' opacity="0.42"')
-      return `<rect class="track" x="${sx.toFixed(1)}" y="${y}" width="${segment.toFixed(1)}" height="${BAR_PX}" rx="${BAR_PX / 2}"/>`
-    })
-  }
-
-  const filled = row.percent > 0 ? Math.max(BAR_PX, (width * Math.min(100, row.percent)) / 100) : 0
-  return [track, filled > 0 ? pill(x, filled, color) : '']
-}
-
-// One row as one image, in four columns: label, a thin bar, the value in tabular figures,
-// and a muted detail. Every row of the band shares the columns, so the bars line up.
-export const desktopRowSvg = (row: RowSpec, columns: DesktopColumns): string => {
-  const h = ROW_PX
-  const mid = h / 2
-  const barX = columns.labelPx
-  const valueEnd = barX + columns.barPx + GUTTER + columns.valuePx
-  const detailX = valueEnd + GUTTER
-  const valueClass = row.tone === 'accent' ? 'value' : `value ${row.tone}`
+  const track = terminalTrack(row, grid.trackCells).map(segment => {
+    const x = trackX + segment.start * CELL_PX
+    if (segment.kind === 'fill') {
+      return [...segment.text].map((char, i) => `<use href="#b${char.codePointAt(0)}" x="${(x + i * CELL_PX).toFixed(1)}" y="${mid}"/>`).join('')
+    }
+    if (segment.kind !== 'pill') return run(x, segment.text, segment.kind)
+    const w = segment.text.length * CELL_PX
+    return `<rect x="${x.toFixed(1)}" y="${mid - 9}" width="${w.toFixed(1)}" height="18" rx="2" fill="${PILL_BG}"/>${run(x, segment.text, 'pill')}`
+  })
+  const label = row.label.length > grid.labelCells ? `${row.label.slice(0, grid.labelCells - 1)}…` : row.label
+  const right = row.right.padStart(grid.rightCells)
+  const rightClass = row.tone === 'accent' ? 'right' : `right ${row.tone}`
 
   return [
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${columns.widthPx}" height="${h}" viewBox="0 0 ${columns.widthPx} ${h}"`,
-    ` font-family="ui-sans-serif, 'Segoe UI', system-ui, -apple-system, sans-serif">`,
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${ROW_PX}" viewBox="0 0 ${width} ${ROW_PX}"`,
+    ` font-family="'Cascadia Mono', 'Cascadia Code', Consolas, 'SF Mono', Menlo, ui-monospace, monospace" font-size="${FONT_PX}">`,
     '<style>',
-    '.label{fill:#F0EDE6}.value{fill:#D6D2CA;font-variant-numeric:tabular-nums}',
-    `.detail{fill:#9A968E}.track{fill:#3A3835}.value.warn{fill:${TONES.warn}}.value.danger{fill:${TONES.danger}}`,
-    '@media (prefers-color-scheme: light){.label{fill:#2A2925}.value{fill:#3D3B36}.detail{fill:#7A766E}.track{fill:#E6E2DA}.value.warn{fill:#B7791F}.value.danger{fill:#C93C37}}',
+    `.label{fill:#ECE9E2}.right{fill:#C9C5BD}.fill,.tickFill{fill:${ORANGE}}.pill{fill:${PILL_FG};font-weight:600}`,
+    `.empty{fill:#6E6A64}.tickEmpty{fill:#8A6A58}.right.warn{fill:${TONES.warn}}.right.danger{fill:${TONES.danger}}`,
+    '@media (prefers-color-scheme: light){.label{fill:#2A2925}.right{fill:#4A4740}.empty{fill:#B3AEA5}.tickEmpty{fill:#B98A70}',
+    '.right.warn{fill:#B7791F}.right.danger{fill:#C93C37}}',
     '</style>',
-    '<defs><linearGradient id="sweep" x1="0" x2="1">',
-    `<stop offset="0" stop-color="${TONES.accent}" stop-opacity="0"/><stop offset="0.5" stop-color="${TONES.accent}"/>`,
-    `<stop offset="1" stop-color="${TONES.accent}" stop-opacity="0"/></linearGradient></defs>`,
-    `<text class="label" x="0" y="${mid}" dominant-baseline="central" font-size="13.5">${escapeXml(clip(row.label, columns.labelPx - GUTTER, LABEL_CH))}</text>`,
-    ...desktopBar(row, barX, columns.barPx, mid - BAR_PX / 2),
-    `<text class="${valueClass}" x="${valueEnd}" y="${mid}" text-anchor="end" dominant-baseline="central" font-size="13">${escapeXml(row.value)}</text>`,
-    columns.detailPx > 0
-      ? `<text class="detail" x="${detailX}" y="${mid}" dominant-baseline="central" font-size="12.5">${escapeXml(clip(row.detail, columns.detailPx, DETAIL_CH))}</text>`
-      : '',
+    `<defs>${[...new Set(BRAILLE)].map(brailleSymbol).join('')}</defs>`,
+    `<circle cx="${(CELL_PX * 0.6).toFixed(1)}" cy="${mid}" r="3.5" fill="${ORANGE}"/>`,
+    run(2 * CELL_PX, label, 'label'),
+    ...track,
+    run((cells - grid.rightCells) * CELL_PX, right, rightClass),
     '</svg>',
   ].join('')
 }

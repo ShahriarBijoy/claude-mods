@@ -3,22 +3,26 @@ import type { Elements, EngineInterface, Register, ToolCallResult } from 'claude
 
 import type { StackAgent, StackLimit, StackTask, StackTaskStatus } from '../types'
 import {
+  CELL_PX,
   MARK,
+  ORANGE,
+  PILL_BG,
+  PILL_FG,
   ROW_NAMES,
   ROW_PX,
   TONES,
   buildRows,
-  desktopColumns,
   desktopRowSvg,
   fit,
   isHidden,
   monthKey,
   parseCcusage,
+  rowGrid,
   summaryParts,
-  terminalBar,
+  terminalTrack,
   toolDetail,
 } from './model'
-import type { DesktopColumns, RowSpec, Segment, StackData } from './model'
+import type { RowGrid, RowSpec, Segment, StackData } from './model'
 
 const tasks = atom({ plugin: 'stack', key: 'tasks' } as const, [])
 const agents = atom({ plugin: 'stack', key: 'agents' } as const, {})
@@ -150,30 +154,17 @@ const setHidden = async ($: $, fn: (ids: string[]) => string[]) => {
 
 type AnyElements = Elements['terminal'] | Elements['desktop']
 
-type Layout =
-  | { surface: 'terminal'; labelCells: number; barCells: number; valueCells: number; detailCells: number }
-  | { surface: 'desktop'; columns: DesktopColumns }
+type Layout = { surface: 'terminal' | 'desktop'; grid: RowGrid }
 
 type ProgressRow = RowSpec & { onHide: () => void }
 
-const longestOf = (rows: RowSpec[], pick: (row: RowSpec) => string): number =>
-  Math.max(0, ...rows.map(row => pick(row).length))
-
-// label  ━━━━━━━━──────  value  detail  ×, two cells between columns; the detail column
-// goes first when the band is too narrow for a useful bar.
-const terminalLayout = (rows: RowSpec[], columns: number): Layout => {
-  const labelCells = Math.min(18, longestOf(rows, row => row.label))
-  const valueCells = longestOf(rows, row => row.value)
-  const fixed = labelCells + 2 + 2 + valueCells + 2 + 1 + 1
-  const detailCells = Math.min(30, longestOf(rows, row => row.detail))
-  const withDetail = columns - fixed - detailCells - 2
-  return withDetail >= 16
-    ? { surface: 'terminal', labelCells, barCells: withDetail, valueCells, detailCells }
-    : { surface: 'terminal', labelCells, barCells: Math.max(8, columns - fixed), valueCells, detailCells: 0 }
+const SEGMENT_STYLE: Record<Segment['kind'], { color?: string; backgroundColor?: string; dimColor?: boolean; bold?: boolean }> = {
+  fill: { color: ORANGE },
+  pill: { color: PILL_FG, backgroundColor: PILL_BG, bold: true },
+  tickFill: { color: ORANGE },
+  tickEmpty: { color: ORANGE, dimColor: true },
+  empty: { dimColor: true },
 }
-
-const segmentStyle = (kind: Segment['kind'], row: RowSpec) =>
-  kind === 'fill' ? { color: TONES[row.tone] } : kind === 'active' ? { color: TONES[row.tone], dimColor: true } : { dimColor: true }
 
 const progressRow = (elements: AnyElements, row: ProgressRow, layout: Layout) => {
   const { Box, Text, Button } = elements
@@ -181,14 +172,10 @@ const progressRow = (elements: AnyElements, row: ProgressRow, layout: Layout) =>
 
   if (layout.surface === 'desktop') {
     const { Svg } = elements as Elements['desktop']
+    const svg = desktopRowSvg(row, layout.grid)
     return (
       <Box key={`row:${row.id}`} flexDirection="row" alignItems="center" gap={1}>
-        <Svg
-          source={desktopRowSvg(row, layout.columns)}
-          alt={`${row.label}: ${row.value}, ${row.detail}`}
-          width={layout.columns.widthPx}
-          height={ROW_PX}
-        />
+        <Svg source={svg} alt={`${row.label}: ${row.pill}, ${row.right}`} width={Number(/width="(\d+)"/.exec(svg)?.[1])} height={ROW_PX} />
         {hide}
       </Box>
     )
@@ -196,13 +183,12 @@ const progressRow = (elements: AnyElements, row: ProgressRow, layout: Layout) =>
 
   return (
     <Box key={`row:${row.id}`} flexDirection="row">
-      <Text>{fit(row.label, layout.labelCells)}  </Text>
-      {terminalBar(row, layout.barCells).map(segment => (
-        <Text {...segmentStyle(segment.kind, row)}>{segment.text}</Text>
+      <Text color={ORANGE}>● </Text>
+      <Text>{fit(row.label, layout.grid.labelCells)}  </Text>
+      {terminalTrack(row, layout.grid.trackCells).map(segment => (
+        <Text {...SEGMENT_STYLE[segment.kind]}>{segment.text}</Text>
       ))}
-      <Text {...(row.tone === 'accent' ? {} : { color: TONES[row.tone] })}>{`  ${row.value.padStart(layout.valueCells)}`}</Text>
-      {layout.detailCells > 0 && <Text dimColor>{`  ${fit(row.detail, layout.detailCells)}`}</Text>}
-      <Text> </Text>
+      <Text {...(row.tone === 'accent' ? {} : { color: TONES[row.tone] })}>{` ${row.right.padStart(layout.grid.rightCells)} `}</Text>
       {hide}
     </Box>
   )
@@ -348,7 +334,7 @@ export const register: Register = on => {
       const parts = summaryParts(rows)
       return (
         <Box flexDirection="row" gap={1}>
-          <Text color={TONES.accent}>{MARK}</Text>
+          <Text color={ORANGE}>{MARK}</Text>
           <Text wrap="truncate">
             {parts.flatMap((part, index) => (index === 0 ? [part] : [<Text dimColor> · </Text>, part]))}
           </Text>
@@ -358,10 +344,9 @@ export const register: Register = on => {
     }
 
     const shown = rows.slice(0, maxRows - 1)
-    const layout: Layout =
-      e.surface === 'desktop'
-        ? { surface: 'desktop', columns: desktopColumns(shown, Math.min(1200, Math.max(360, Math.round(bodyColumns * 7.6) - 48))) }
-        : terminalLayout(shown, bodyColumns)
+    // The desktop has no cells; its rows are drawn on a grid of CELL_PX that fills the band.
+    const cells = e.surface === 'desktop' ? Math.floor(Math.min(1100, Math.max(360, bodyColumns * 7.6 - 60)) / CELL_PX) : bodyColumns - 2
+    const layout: Layout = { surface: e.surface, grid: rowGrid(shown, cells) }
 
     const more = rows.length - shown.length
     const hideRow = (id: string) => () => setHidden($, list => [...list, id])

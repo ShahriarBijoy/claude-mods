@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On, SessionRateLimit } from 'claude-code'
 
-import { buildRows, terminalBar, toolDetail } from '../hooks/model'
+import { buildRows, terminalTrack, toolDetail } from '../hooks/model'
 
 const SURFACES = ['terminal', 'desktop'] as const
 const OCT_2 = new Date(2026, 9, 2, 12).getTime()
@@ -70,7 +70,7 @@ const todos = (...statuses: string[]) =>
   statuses.map((status, index) => ({ content: `task ${index}`, activeForm: `doing ${index}`, status }))
 
 describe('stack', () => {
-  test('tasks: a summary when collapsed, one bar segment per task and the active task when expanded', async ($, on) => {
+  test('tasks: a summary when collapsed; the dither, the pill and a tick per task when expanded', async ($, on) => {
     mock.clock(on, { now: OCT_2 })
     memoryStore(on)
     world(on)
@@ -84,15 +84,15 @@ describe('stack', () => {
 
       if (surface === 'terminal') {
         const texts = (await ui.findAll({ type: 'Text' })).map(text => text.text)
-        // Each segment is its own run of line characters, split from the next by a gap.
-        expect(texts.filter(text => /^[━─]+$/.test(text))).toHaveLength(4)
-        expect(texts.some(text => text.trim() === '2/4')).toBe(true)
-        expect(texts.some(text => text.trim() === 'doing 2')).toBe(true)
+        expect((await ui.find({ type: 'Text', text: ' Tasks 2/4 ' }))?.props).toMatchObject({ backgroundColor: '#B5532F' })
+        expect(texts.filter(text => text === '│')).toHaveLength(3)
+        expect(texts.some(text => /^[⣿⣷⡿⡷⣾]+$/.test(text))).toBe(true)
+        expect(texts.some(text => text.trim() === '50%')).toBe(true)
       } else {
         const svg = await ui.find({ type: 'Svg' })
-        expect(svg?.props.alt).toBe('Tasks: 2/4, doing 2')
-        expect(String(svg?.props.source).match(/<rect[^>]*height="6"/g)).toHaveLength(4)
-        expect(String(svg?.props.source)).toContain('opacity="0.42"')
+        expect(svg?.props.alt).toBe('Tasks: Tasks 2/4, 50%')
+        expect(String(svg?.props.source).match(/class="tick(Fill|Empty)"/g)).toHaveLength(3)
+        expect(String(svg?.props.source)).toContain('<use href="#b')
       }
       await ui.press({ key: 'toggle' })
       await ui.unmount()
@@ -129,13 +129,13 @@ describe('stack', () => {
     for (const surface of SURFACES) {
       const ui = await $.ui.mount(band(surface))
       if (surface === 'terminal') {
-        expect(await ui.find({ type: 'Text', text: 'resets 3:40 PM' })).toBeDefined()
-        expect(await ui.find({ type: 'Text', text: 'resets Wed 7 AM' })).toBeDefined()
+        expect(await ui.find({ type: 'Text', text: ' 3:40 PM ' })).toBeDefined()
+        expect(await ui.find({ type: 'Text', text: ' Wed 7 AM ' })).toBeDefined()
         expect(await ui.find({ type: 'Text', text: '16%' })).toBeDefined()
       } else {
         expect((await ui.findAll({ type: 'Svg' })).map(svg => svg.props.alt)).toEqual([
-          'Session limit: 23%, resets 3:40 PM',
-          'Weekly limit: 16%, resets Wed 7 AM',
+          'Session limit: 3:40 PM, 23%',
+          'Weekly limit: Wed 7 AM, 16%',
         ])
       }
       await ui.unmount()
@@ -161,8 +161,26 @@ describe('stack', () => {
 
     const desktop = await $.ui.mount(band('desktop'))
     const [session, weekly] = await desktop.findAll({ type: 'Svg' })
-    expect(String(session?.props.source)).toContain('class="value warn"')
-    expect(String(weekly?.props.source)).toContain('class="value danger"')
+    expect(String(session?.props.source)).toContain('class="right warn"')
+    expect(String(weekly?.props.source)).toContain('class="right danger"')
+  })
+
+  test('a fill shorter than its pill stays visible, the pill following it', async ($, on) => {
+    mock.clock(on, { now: OCT_2 })
+    memoryStore(on)
+    world(on, { rateLimits: [{ kind: 'five_hour', percentUsed: 5, resetsAt: new Date(2026, 9, 2, 22).toISOString() }] })
+    await start($)
+    await command($, 'expand')
+
+    const terminal = await $.ui.mount(band('terminal'))
+    const texts = (await terminal.findAll({ type: 'Text' })).map(text => text.text)
+    expect(texts[texts.indexOf(' 10 PM ') - 1]).toMatch(/^[⣿⣷⡿⡷⣾]+$/)
+    await terminal.unmount()
+
+    const desktop = await $.ui.mount(band('desktop'))
+    const source = String((await desktop.find({ type: 'Svg' }))?.props.source)
+    expect(source.indexOf('<use href="#b')).toBeGreaterThan(-1)
+    expect(source.indexOf('<use href="#b')).toBeLessThan(source.indexOf('fill="#B5532F"'))
   })
 
   test('each turn adds the cost delta to this month and the bar compares it to last month', async ($, on) => {
@@ -179,8 +197,8 @@ describe('stack', () => {
     await command($, 'expand')
     const ui = await $.ui.mount(band('terminal'))
     expect(await ui.find({ type: 'Text', text: 'October so far' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: '$2.25' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: '50% of Sep · $4.50' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: ' $2.25 / Sep $4.50 ' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '50%' })).toBeDefined()
   })
 
   test('ccusage backfills earlier months and the result is cached', async ($, on) => {
@@ -193,7 +211,7 @@ describe('stack', () => {
     expect(store['ccusage']).toEqual({ fetchedAt: OCT_2 + 1000, months: { '2026-09': 62.4, '2026-10': 38.2 } })
     await command($, 'expand')
     const ui = await $.ui.mount(band('desktop'))
-    expect((await ui.find({ type: 'Svg' }))?.props.alt).toBe('October so far: $38.20, 61% of Sep · $62.40')
+    expect((await ui.find({ type: 'Svg' }))?.props.alt).toBe('October so far: $38.20 / Sep $62.40, 61%')
   })
 
   test('a blocked ccusage run is reported by /stack', async ($, on) => {
@@ -240,18 +258,15 @@ describe('subagent rows', () => {
     expect(toolDetail('Bash', { command: 'npm   run\n test' })).toBe('Bash npm run test')
   })
 
-  test('with no known total, the marker moves along the bar as tool calls land', () => {
+  test('with no known total, the dither run and its pill move along as tool calls land', () => {
     const rows = buildRows(
       { tasks: [], limits: [], tracked: {}, backfill: {}, agents: { a: { label: 'Explore', tool: 'Read', calls: 2 } } },
       OCT_2,
     )
     const row = rows[0]!
-    const markerAt = (phase: number) => {
-      const segments = terminalBar({ ...row, phase }, 40)
-      const before = segments.slice(0, segments.findIndex(segment => segment.kind === 'fill'))
-      return before.reduce((cells, segment) => cells + segment.text.length, 0)
-    }
-    expect(row.value).toBe('2 calls')
+    const markerAt = (phase: number) => terminalTrack({ ...row, phase }, 40).find(segment => segment.kind === 'fill')?.start
+    expect(row.right).toBe('2 calls')
+    expect(row.pill).toBe('Read')
     expect(markerAt(3)).not.toBe(markerAt(4))
   })
 })
