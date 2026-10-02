@@ -1,23 +1,29 @@
 import type { StackAgent, StackLimit, StackTask } from '../types'
 
-export const FILL = '#a99cf5'
-export const TICK_ON_FILL = '#2c2c2c'
-export const PILL_BG = '#5b4dd6'
-export const PILL_FG = '#ffffff'
+// Claude's clay, with warm warning colours for limits running out.
+export const TONES = { accent: '#D97757', warn: '#E0A84E', danger: '#E5534B' } as const
+export const MARK = '✻'
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 const MONTHS_LONG = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const DAY_MS = 24 * 60 * 60 * 1000
 
+export type Tone = keyof typeof TONES
+
 export type RowSpec = {
   id: string
   label: string
-  percent: number
-  pill: string
+  // null: no known total (a subagent), drawn as a marker that moves with each tool call.
+  percent: number | null
+  value: string
+  detail: string
+  tone: Tone
+  // A bar of `steps` segments with `done` filled, the next one half-lit while `isStepActive`.
   steps: number
-  // Shown in the percentage column instead of the percent (a subagent has no total).
-  caption?: string
+  done: number
+  isStepActive: boolean
+  phase: number
 }
 
 export type StackData = {
@@ -68,44 +74,70 @@ const LIMIT_ROWS: Record<string, { id: string; label: string; short: string }> =
 
 const limitRow = (kind: string) => LIMIT_ROWS[kind] ?? { id: kind, label: kind, short: kind }
 
+const limitTone = (percent: number): Tone => (percent >= 90 ? 'danger' : percent >= 75 ? 'warn' : 'accent')
+
 const shortTool = (tool: string): string => tool.replace(/^mcp__.+?__/, '')
 
-// A subagent has no known total, so its bar fills toward, never reaching, the end as it works.
-const activity = (calls: number): number => (calls / (calls + 8)) * 100
+const baseName = (path: string): string => path.split(/[\\/]/).pop() ?? path
+
+const oneLine = (text: string, length: number): string => {
+  const flat = text.replace(/\s+/g, ' ').trim()
+  return flat.length > length ? `${flat.slice(0, length - 1)}…` : flat
+}
+
+// What a subagent's tool call is about, in a few words: the file it reads, the pattern it
+// searches, the command it runs.
+export const toolDetail = (tool: string, args: Record<string, unknown>): string => {
+  const pick = (key: string) => (typeof args[key] === 'string' ? (args[key] as string) : undefined)
+  const path = pick('file_path') ?? pick('notebook_path') ?? pick('path')
+  const subject = (path && baseName(path)) ?? pick('pattern') ?? pick('command') ?? pick('url') ?? pick('query') ?? pick('description')
+  return oneLine(subject ? `${shortTool(tool)} ${subject}` : shortTool(tool), 48)
+}
+
+const blank = { steps: 0, done: 0, isStepActive: false, phase: 0, tone: 'accent' as Tone }
 
 export const buildRows = (data: StackData, now: number): RowSpec[] => {
   const rows: RowSpec[] = []
 
   if (data.tasks.length > 0) {
     const done = data.tasks.filter(task => task.status === 'completed').length
+    const active = data.tasks.find(task => task.status === 'in_progress')
+    const next = data.tasks.find(task => task.status === 'pending')
     rows.push({
+      ...blank,
       id: 'tasks',
       label: 'Tasks',
       percent: (done / data.tasks.length) * 100,
-      pill: `Tasks ${done}/${data.tasks.length}`,
+      value: `${done}/${data.tasks.length}`,
+      detail: active ? active.activeForm || active.subject : next ? `Next: ${next.subject}` : 'All done',
       steps: data.tasks.length,
+      done,
+      isStepActive: active !== undefined,
     })
   }
 
   for (const [id, agent] of Object.entries(data.agents)) {
     rows.push({
+      ...blank,
       id: `agent:${id}`,
       label: agent.label,
-      percent: activity(agent.calls),
-      pill: shortTool(agent.tool),
-      steps: 0,
-      caption: `${agent.calls} ${agent.calls === 1 ? 'call' : 'calls'}`,
+      percent: null,
+      value: `${agent.calls} ${agent.calls === 1 ? 'call' : 'calls'}`,
+      detail: agent.detail ?? shortTool(agent.tool),
+      phase: agent.calls,
     })
   }
 
   for (const limit of data.limits) {
     const meta = limitRow(limit.kind)
     rows.push({
+      ...blank,
       id: meta.id,
       label: meta.label,
       percent: limit.percentUsed,
-      pill: formatReset(limit.resetsAt, now),
-      steps: 0,
+      value: `${Math.round(limit.percentUsed)}%`,
+      detail: `resets ${formatReset(limit.resetsAt, now)}`,
+      tone: limitTone(limit.percentUsed),
     })
   }
 
@@ -114,33 +146,30 @@ export const buildRows = (data: StackData, now: number): RowSpec[] => {
   const thisMonth = monthTotal(data, thisKey)
   const lastMonth = monthTotal(data, lastKey)
   if (thisMonth > 0 || lastMonth > 0) {
+    const percent = lastMonth > 0 ? (thisMonth / lastMonth) * 100 : 100
     rows.push({
+      ...blank,
       id: 'costs',
       label: `${MONTHS_LONG[monthIndex(thisKey)]} so far`,
-      percent: lastMonth > 0 ? (thisMonth / lastMonth) * 100 : 100,
-      pill: lastMonth > 0 ? `${usd(thisMonth)} · ${MONTHS[monthIndex(lastKey)]} ${usd(lastMonth)}` : usd(thisMonth),
-      steps: 0,
+      percent,
+      value: usd(thisMonth),
+      detail: lastMonth > 0 ? `${Math.round(percent)}% of ${MONTHS[monthIndex(lastKey)]} · ${usd(lastMonth)}` : 'no spend last month',
+      tone: percent > 100 ? 'warn' : 'accent',
     })
   }
 
   return rows
 }
 
-export const summaryParts = (rows: RowSpec[], data: StackData, now: number): string[] => {
+export const summaryParts = (rows: RowSpec[]): string[] => {
   const parts: string[] = []
   const agents = rows.filter(row => row.id.startsWith('agent:')).length
+  if (agents > 0) parts.push(`${agents} ${agents === 1 ? 'agent' : 'agents'}`)
   for (const row of rows) {
     const limit = Object.values(LIMIT_ROWS).find(meta => meta.id === row.id)
-    if (row.id === 'tasks') parts.push(row.pill)
-    else if (row.id.startsWith('agent:')) {
-      if (!parts.some(part => part.endsWith('agent') || part.endsWith('agents'))) {
-        parts.push(`${agents} ${agents === 1 ? 'agent' : 'agents'}`)
-      }
-    } else if (limit) parts.push(`${limit.short} ${Math.round(row.percent)}%`)
-    else if (row.id === 'costs') {
-      const key = monthKey(now)
-      parts.push(`${MONTHS[monthIndex(key)]} ${usd(monthTotal(data, key))} (${Math.round(row.percent)}%)`)
-    }
+    if (row.id === 'tasks') parts.unshift(`Tasks ${row.value}`)
+    else if (limit) parts.push(`${limit.short} ${row.value}`)
+    else if (row.id === 'costs') parts.push(`${row.label.split(' ')[0]?.slice(0, 3)} ${row.value}`)
   }
   return parts
 }
@@ -163,96 +192,148 @@ export const ROW_NAMES: Record<string, string[]> = {
 export const isHidden = (id: string, hidden: readonly string[]): boolean =>
   hidden.includes(id) || (id.startsWith('agent:') && hidden.includes('subagents'))
 
-export const rightLabel = (row: RowSpec): string => row.caption ?? `${Math.round(row.percent)}%`
+export const fit = (text: string, cells: number): string =>
+  text.length > cells ? `${text.slice(0, Math.max(0, cells - 1))}…` : text.padEnd(cells)
 
-// Terminal track ------------------------------------------------------------
+// Terminal bar --------------------------------------------------------------
 
-export type SegmentKind = 'fill' | 'pill' | 'empty' | 'tickFill' | 'tickEmpty'
+export type SegmentKind = 'fill' | 'active' | 'track' | 'gap'
 export type Segment = { kind: SegmentKind; text: string }
 
-const tickCells = (cells: number, steps: number): Set<number> => {
-  const ticks = new Set<number>()
-  for (let i = 1; i < steps; i++) ticks.add(Math.round((cells * i) / steps))
-  return ticks
-}
+const FILLED = '━'
+const EMPTY = '─'
 
-// One cell per character: a solid block up to the progress point, the pill ending at it,
-// a tick at each step boundary and a dim dot for every empty cell.
-export const terminalTrack = (row: RowSpec, cells: number): Segment[] => {
-  const pill = ` ${row.pill} `.slice(0, cells)
-  const exact = (cells * Math.min(100, Math.max(0, row.percent))) / 100
-  const fillEnd = row.percent > 0 ? Math.max(1, Math.round(exact)) : 0
-  // The pill ends at the fill's edge only while the fill is long enough to show around it;
-  // a shorter fill stays visible and the pill follows it.
-  const isPillInside = fillEnd >= pill.length + 2
-  const pillStart = Math.min(isPillInside ? fillEnd - pill.length : fillEnd, cells - pill.length)
-  const ticks = tickCells(cells, row.steps)
+const percentCells = (percent: number, cells: number): number =>
+  percent > 0 ? Math.max(1, Math.round((cells * Math.min(100, percent)) / 100)) : 0
+
+// A thin line: heavy where it is filled, light where it is not. Steps split it into segments
+// with a gap between; no known total draws a short heavy marker that moves on each tool call.
+export const terminalBar = (row: RowSpec, cells: number): Segment[] => {
+  const kinds: SegmentKind[] = new Array(cells).fill('track')
+  const gap = 1
+  const segmentCells = row.steps > 1 ? (cells - gap * (row.steps - 1)) / row.steps : 0
+
+  if (row.percent === null) {
+    const block = Math.max(3, Math.round(cells / 6))
+    const start = ((row.phase * 3) % (cells + block)) - block
+    for (let cell = Math.max(0, start); cell < Math.min(cells, start + block); cell++) kinds[cell] = 'fill'
+  } else if (segmentCells >= 2) {
+    for (let step = 0; step < row.steps; step++) {
+      const from = Math.round(step * (segmentCells + gap))
+      const to = Math.round(step * (segmentCells + gap) + segmentCells)
+      const kind: SegmentKind = step < row.done ? 'fill' : step === row.done && row.isStepActive ? 'active' : 'track'
+      for (let cell = from; cell < to && cell < cells; cell++) kinds[cell] = kind
+      if (step < row.steps - 1 && to < cells) kinds[to] = 'gap'
+    }
+  } else {
+    for (let cell = 0; cell < percentCells(row.percent, cells); cell++) kinds[cell] = 'fill'
+  }
+
   const segments: Segment[] = []
-
-  const push = (kind: SegmentKind, char: string) => {
+  for (const kind of kinds) {
+    const char = kind === 'gap' ? ' ' : kind === 'track' ? EMPTY : FILLED
     const last = segments[segments.length - 1]
     if (last?.kind === kind) last.text += char
     else segments.push({ kind, text: char })
-  }
-
-  for (let cell = 0; cell < cells; cell++) {
-    const isFill = cell < fillEnd
-    if (cell >= pillStart && cell < pillStart + pill.length) push('pill', pill[cell - pillStart] ?? ' ')
-    else if (ticks.has(cell)) push(isFill ? 'tickFill' : 'tickEmpty', '│')
-    else if (isFill) push('fill', '█')
-    else push('empty', '·')
   }
   return segments
 }
 
 // Desktop row ---------------------------------------------------------------
 
-export const ROW_PX = 36
+export const ROW_PX = 30
+const BAR_PX = 6
+
+export type DesktopColumns = { widthPx: number; labelPx: number; barPx: number; valuePx: number; detailPx: number }
+
+const LABEL_CH = 7.6
+const VALUE_CH = 7.2
+const DETAIL_CH = 6.8
+const GUTTER = 16
+
+export const desktopColumns = (rows: RowSpec[], widthPx: number): DesktopColumns => {
+  const longest = (pick: (row: RowSpec) => string) => Math.max(0, ...rows.map(row => pick(row).length))
+  const labelPx = Math.min(240, Math.max(96, Math.round(longest(row => row.label) * LABEL_CH) + GUTTER))
+  const valuePx = Math.round(longest(row => row.value) * VALUE_CH) + 4
+  let detailPx = Math.min(280, Math.round(longest(row => row.detail) * DETAIL_CH))
+  let barPx = widthPx - labelPx - GUTTER - valuePx - GUTTER - detailPx
+  if (barPx < 140) {
+    detailPx = 0
+    barPx = widthPx - labelPx - GUTTER - valuePx
+  }
+  return { widthPx, labelPx, barPx: Math.max(60, barPx), valuePx, detailPx }
+}
 
 const escapeXml = (text: string): string =>
   text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
-const textPx = (text: string, size: number): number => text.length * size * 0.6
+const clip = (text: string, px: number, ch: number): string => {
+  const fitsChars = Math.floor(px / ch)
+  return text.length > fitsChars ? `${text.slice(0, Math.max(0, fitsChars - 1))}…` : text
+}
 
-// The whole row as one image: dot, label, rounded track with a solid fill up to the
-// progress point, ticks over the empty track, the pill at the fill's edge and the percentage.
-export const desktopRowSvg = (row: RowSpec, widthPx: number, labelPx: number): string => {
-  const h = ROW_PX
-  const trackX = labelPx
-  const trackW = Math.max(60, widthPx - labelPx - 64)
-  const trackY = 3
-  const trackH = h - 6
-  const exactW = (trackW * Math.min(100, Math.max(0, row.percent))) / 100
-  const fillW = row.percent > 0 ? Math.max(8, exactW) : 0
-  const pillW = Math.min(trackW, textPx(row.pill, 13) + 24)
-  const isPillInside = fillW >= pillW + 16
-  const pillH = trackH - 4
-  const pillX = Math.min(trackX + (isPillInside ? fillW - pillW : fillW + 6), trackX + trackW - pillW)
-  const ticks: string[] = []
-  for (let i = 1; i < row.steps; i++) {
-    const x = trackX + (trackW * i) / row.steps
-    if (x > pillX - 2 && x < pillX + pillW + 2) continue
-    ticks.push(`<line class="tick" x1="${x.toFixed(1)}" x2="${x.toFixed(1)}" y1="${h / 2 - 6}" y2="${h / 2 + 6}"/>`)
+const desktopBar = (row: RowSpec, x: number, width: number, y: number): string[] => {
+  const color = TONES[row.tone]
+  const pill = (px: number, w: number, fill: string, extra = '') =>
+    `<rect x="${px.toFixed(1)}" y="${y}" width="${Math.max(0, w).toFixed(1)}" height="${BAR_PX}" rx="${BAR_PX / 2}" fill="${fill}"${extra}/>`
+
+  const track = `<rect class="track" x="${x}" y="${y}" width="${width}" height="${BAR_PX}" rx="${BAR_PX / 2}"/>`
+
+  // No known total: a soft marker sweeps the track. Where the surface does not animate the
+  // image, it rests where the tool-call count puts it, so it still moves as the agent works.
+  if (row.percent === null) {
+    const block = Math.max(28, width * 0.18)
+    const start = x + ((row.phase * 37) % Math.max(1, width - block))
+    return [
+      track,
+      `<clipPath id="bar"><rect x="${x}" y="${y}" width="${width}" height="${BAR_PX}" rx="${BAR_PX / 2}"/></clipPath>`,
+      `<g clip-path="url(#bar)"><rect x="${start.toFixed(1)}" y="${y}" width="${block.toFixed(1)}" height="${BAR_PX}" rx="${BAR_PX / 2}" fill="url(#sweep)">`,
+      `<animate attributeName="x" values="${(x - block).toFixed(1)};${(x + width).toFixed(1)}" dur="1.8s" repeatCount="indefinite"/></rect></g>`,
+    ]
   }
-  const label = row.label.length * 8.6 > labelPx - 36 ? `${row.label.slice(0, Math.floor((labelPx - 36) / 8.6) - 1)}…` : row.label
+
+  if (row.steps > 1 && width / row.steps >= 8) {
+    const gap = 3
+    const segment = (width - gap * (row.steps - 1)) / row.steps
+    return Array.from({ length: row.steps }, (_, step) => {
+      const sx = x + step * (segment + gap)
+      if (step < row.done) return pill(sx, segment, color)
+      if (step === row.done && row.isStepActive) return pill(sx, segment, color, ' opacity="0.42"')
+      return `<rect class="track" x="${sx.toFixed(1)}" y="${y}" width="${segment.toFixed(1)}" height="${BAR_PX}" rx="${BAR_PX / 2}"/>`
+    })
+  }
+
+  const filled = row.percent > 0 ? Math.max(BAR_PX, (width * Math.min(100, row.percent)) / 100) : 0
+  return [track, filled > 0 ? pill(x, filled, color) : '']
+}
+
+// One row as one image, in four columns: label, a thin bar, the value in tabular figures,
+// and a muted detail. Every row of the band shares the columns, so the bars line up.
+export const desktopRowSvg = (row: RowSpec, columns: DesktopColumns): string => {
+  const h = ROW_PX
+  const mid = h / 2
+  const barX = columns.labelPx
+  const valueEnd = barX + columns.barPx + GUTTER + columns.valuePx
+  const detailX = valueEnd + GUTTER
+  const valueClass = row.tone === 'accent' ? 'value' : `value ${row.tone}`
 
   return [
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${widthPx}" height="${h}" viewBox="0 0 ${widthPx} ${h}" font-family="Segoe UI, system-ui, -apple-system, sans-serif">`,
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${columns.widthPx}" height="${h}" viewBox="0 0 ${columns.widthPx} ${h}"`,
+    ` font-family="ui-sans-serif, 'Segoe UI', system-ui, -apple-system, sans-serif">`,
     '<style>',
-    `.label{fill:#ececec}.pct{fill:#b8b8b8}.track{fill:#2c2c2c}.tick{stroke:#8a8a8a;stroke-width:1.2}`,
-    `@media (prefers-color-scheme: light){.label{fill:#1f1f1f}.pct{fill:#555}.track{fill:#e7e5ef}.tick{stroke:#9a97a8}}`,
+    '.label{fill:#F0EDE6}.value{fill:#D6D2CA;font-variant-numeric:tabular-nums}',
+    `.detail{fill:#9A968E}.track{fill:#3A3835}.value.warn{fill:${TONES.warn}}.value.danger{fill:${TONES.danger}}`,
+    '@media (prefers-color-scheme: light){.label{fill:#2A2925}.value{fill:#3D3B36}.detail{fill:#7A766E}.track{fill:#E6E2DA}.value.warn{fill:#B7791F}.value.danger{fill:#C93C37}}',
     '</style>',
-    '<defs>',
-    `<clipPath id="track"><rect x="${trackX}" y="${trackY}" width="${trackW}" height="${trackH}" rx="8"/></clipPath>`,
-    '</defs>',
-    `<circle cx="7" cy="${h / 2}" r="4" fill="${FILL}"/>`,
-    `<text class="label" x="26" y="${h / 2}" dominant-baseline="central" font-size="15">${escapeXml(label)}</text>`,
-    `<rect class="track" x="${trackX}" y="${trackY}" width="${trackW}" height="${trackH}" rx="8"/>`,
-    `<g clip-path="url(#track)"><rect x="${trackX}" y="${trackY}" width="${fillW.toFixed(1)}" height="${trackH}" fill="${FILL}"/></g>`,
-    ...ticks,
-    `<rect x="${pillX.toFixed(1)}" y="${trackY + 2}" width="${pillW.toFixed(1)}" height="${pillH}" rx="${pillH / 2}" fill="${PILL_BG}"/>`,
-    `<text x="${(pillX + pillW / 2).toFixed(1)}" y="${h / 2}" text-anchor="middle" dominant-baseline="central" font-size="13" fill="${PILL_FG}">${escapeXml(row.pill)}</text>`,
-    `<text class="pct" x="${widthPx - 4}" y="${h / 2}" text-anchor="end" dominant-baseline="central" font-size="15">${escapeXml(rightLabel(row))}</text>`,
+    '<defs><linearGradient id="sweep" x1="0" x2="1">',
+    `<stop offset="0" stop-color="${TONES.accent}" stop-opacity="0"/><stop offset="0.5" stop-color="${TONES.accent}"/>`,
+    `<stop offset="1" stop-color="${TONES.accent}" stop-opacity="0"/></linearGradient></defs>`,
+    `<text class="label" x="0" y="${mid}" dominant-baseline="central" font-size="13.5">${escapeXml(clip(row.label, columns.labelPx - GUTTER, LABEL_CH))}</text>`,
+    ...desktopBar(row, barX, columns.barPx, mid - BAR_PX / 2),
+    `<text class="${valueClass}" x="${valueEnd}" y="${mid}" text-anchor="end" dominant-baseline="central" font-size="13">${escapeXml(row.value)}</text>`,
+    columns.detailPx > 0
+      ? `<text class="detail" x="${detailX}" y="${mid}" dominant-baseline="central" font-size="12.5">${escapeXml(clip(row.detail, columns.detailPx, DETAIL_CH))}</text>`
+      : '',
     '</svg>',
   ].join('')
 }

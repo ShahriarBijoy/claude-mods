@@ -3,22 +3,22 @@ import type { Elements, EngineInterface, Register, ToolCallResult } from 'claude
 
 import type { StackAgent, StackLimit, StackTask, StackTaskStatus } from '../types'
 import {
-  FILL,
-  TICK_ON_FILL,
-  PILL_BG,
-  PILL_FG,
+  MARK,
   ROW_NAMES,
   ROW_PX,
+  TONES,
   buildRows,
+  desktopColumns,
   desktopRowSvg,
+  fit,
   isHidden,
   monthKey,
   parseCcusage,
-  rightLabel,
   summaryParts,
-  terminalTrack,
+  terminalBar,
+  toolDetail,
 } from './model'
-import type { RowSpec, Segment, StackData } from './model'
+import type { DesktopColumns, RowSpec, Segment, StackData } from './model'
 
 const tasks = atom({ plugin: 'stack', key: 'tasks' } as const, [])
 const agents = atom({ plugin: 'stack', key: 'agents' } as const, {})
@@ -57,13 +57,14 @@ const createdTaskId = (ran: ToolCallResult): string | undefined => {
   return id === undefined ? undefined : String(id)
 }
 
-const noteAgentTool = async ($: $, agentId: string, tool: string) => {
+const noteAgentTool = async ($: $, agentId: string, tool: string, args: Record<string, unknown>) => {
   const known = (await read($, agents))[agentId]
   const info = known ? undefined : (await $.agent.list()).find(agent => agent.id === agentId)
   const label = known?.label ?? info?.description ?? info?.type ?? 'Subagent'
+  const detail = toolDetail(tool, args)
   await update($, agents, all => {
     const before: StackAgent = all[agentId] ?? { label, tool, calls: 0 }
-    return { ...all, [agentId]: { ...before, tool, calls: before.calls + 1 } }
+    return { ...all, [agentId]: { ...before, tool, detail, calls: before.calls + 1 } }
   })
 }
 
@@ -150,26 +151,32 @@ const setHidden = async ($: $, fn: (ids: string[]) => string[]) => {
 type AnyElements = Elements['terminal'] | Elements['desktop']
 
 type Layout =
-  | { surface: 'terminal'; labelCells: number; trackCells: number }
-  | { surface: 'desktop'; widthPx: number; labelPx: number }
+  | { surface: 'terminal'; labelCells: number; barCells: number; valueCells: number; detailCells: number }
+  | { surface: 'desktop'; columns: DesktopColumns }
 
-type ProgressRow = Pick<RowSpec, 'label' | 'percent' | 'pill' | 'steps'> &
-  Partial<RowSpec> & { id: string; onHide: () => void }
+type ProgressRow = RowSpec & { onHide: () => void }
 
-const SEGMENT_STYLE: Record<Segment['kind'], { color?: string; backgroundColor?: string; dimColor?: boolean; bold?: boolean }> = {
-  fill: { color: FILL },
-  pill: { color: PILL_FG, backgroundColor: PILL_BG, bold: true },
-  tickFill: { color: TICK_ON_FILL, backgroundColor: FILL },
-  tickEmpty: { dimColor: true },
-  empty: { dimColor: true },
+const longestOf = (rows: RowSpec[], pick: (row: RowSpec) => string): number =>
+  Math.max(0, ...rows.map(row => pick(row).length))
+
+// label  ━━━━━━━━──────  value  detail  ×, two cells between columns; the detail column
+// goes first when the band is too narrow for a useful bar.
+const terminalLayout = (rows: RowSpec[], columns: number): Layout => {
+  const labelCells = Math.min(18, longestOf(rows, row => row.label))
+  const valueCells = longestOf(rows, row => row.value)
+  const fixed = labelCells + 2 + 2 + valueCells + 2 + 1 + 1
+  const detailCells = Math.min(30, longestOf(rows, row => row.detail))
+  const withDetail = columns - fixed - detailCells - 2
+  return withDetail >= 16
+    ? { surface: 'terminal', labelCells, barCells: withDetail, valueCells, detailCells }
+    : { surface: 'terminal', labelCells, barCells: Math.max(8, columns - fixed), valueCells, detailCells: 0 }
 }
 
-const fit = (text: string, cells: number): string =>
-  text.length > cells ? `${text.slice(0, Math.max(0, cells - 1))}…` : text.padEnd(cells)
+const segmentStyle = (kind: Segment['kind'], row: RowSpec) =>
+  kind === 'fill' ? { color: TONES[row.tone] } : kind === 'active' ? { color: TONES[row.tone], dimColor: true } : { dimColor: true }
 
 const progressRow = (elements: AnyElements, row: ProgressRow, layout: Layout) => {
   const { Box, Text, Button } = elements
-  const spec: RowSpec = { ...row }
   const hide = <Button key={`hide:${row.id}`} label="×" plain dimColor onPress={row.onHide} />
 
   if (layout.surface === 'desktop') {
@@ -177,9 +184,9 @@ const progressRow = (elements: AnyElements, row: ProgressRow, layout: Layout) =>
     return (
       <Box key={`row:${row.id}`} flexDirection="row" alignItems="center" gap={1}>
         <Svg
-          source={desktopRowSvg(spec, layout.widthPx, layout.labelPx)}
-          alt={`${row.label}: ${row.pill}, ${rightLabel(spec)}`}
-          width={layout.widthPx}
+          source={desktopRowSvg(row, layout.columns)}
+          alt={`${row.label}: ${row.value}, ${row.detail}`}
+          width={layout.columns.widthPx}
           height={ROW_PX}
         />
         {hide}
@@ -189,12 +196,13 @@ const progressRow = (elements: AnyElements, row: ProgressRow, layout: Layout) =>
 
   return (
     <Box key={`row:${row.id}`} flexDirection="row">
-      <Text color={FILL}>● </Text>
-      <Text>{fit(row.label, layout.labelCells)} </Text>
-      {terminalTrack(spec, layout.trackCells).map(segment => (
-        <Text {...SEGMENT_STYLE[segment.kind]}>{segment.text}</Text>
+      <Text>{fit(row.label, layout.labelCells)}  </Text>
+      {terminalBar(row, layout.barCells).map(segment => (
+        <Text {...segmentStyle(segment.kind, row)}>{segment.text}</Text>
       ))}
-      <Text>{` ${rightLabel(spec).padStart(5)} `}</Text>
+      <Text {...(row.tone === 'accent' ? {} : { color: TONES[row.tone] })}>{`  ${row.value.padStart(layout.valueCells)}`}</Text>
+      {layout.detailCells > 0 && <Text dimColor>{`  ${fit(row.detail, layout.detailCells)}`}</Text>}
+      <Text> </Text>
       {hide}
     </Box>
   )
@@ -232,14 +240,19 @@ export const register: Register = on => {
     const tool: string = e.tool
     const args = e as unknown as Record<string, unknown>
     if (e.agentId) {
-      await noteAgentTool($, e.agentId, tool)
+      await noteAgentTool($, e.agentId, tool, args)
       return next(e)
     }
 
     if (tool === 'TodoWrite' && Array.isArray(args.todos)) {
       const todos = args.todos as Array<Record<string, unknown>>
       await setTasks($, () =>
-        todos.map((todo, index) => ({ id: String(index), subject: String(todo.content ?? ''), status: asStatus(todo.status) })),
+        todos.map((todo, index) => ({
+          id: String(index),
+          subject: String(todo.content ?? ''),
+          status: asStatus(todo.status),
+          ...(typeof todo.activeForm === 'string' ? { activeForm: todo.activeForm } : {}),
+        })),
       )
       return next(e)
     }
@@ -248,7 +261,13 @@ export const register: Register = on => {
       const ran = await next(e)
       const id = createdTaskId(ran)
       if (!ran.isError && !ran.deny && id !== undefined) {
-        await setTasks($, list => [...list.filter(task => task.id !== id), { id, subject: String(args.subject ?? ''), status: 'pending' }])
+        const task: StackTask = {
+          id,
+          subject: String(args.subject ?? ''),
+          status: 'pending',
+          ...(typeof args.activeForm === 'string' ? { activeForm: args.activeForm } : {}),
+        }
+        await setTasks($, list => [...list.filter(one => one.id !== id), task])
       }
       return ran
     }
@@ -326,30 +345,24 @@ export const register: Register = on => {
     )
 
     if (!(await read($, isExpanded)) || maxRows < 2) {
-      const summary = summaryParts(rows, data, now).join(' · ')
+      const parts = summaryParts(rows)
       return (
         <Box flexDirection="row" gap={1}>
-          <Text color={FILL}>●</Text>
-          <Text wrap="truncate">{fit(summary, Math.max(8, bodyColumns - 16)).trimEnd()}</Text>
+          <Text color={TONES.accent}>{MARK}</Text>
+          <Text wrap="truncate">
+            {parts.flatMap((part, index) => (index === 0 ? [part] : [<Text dimColor> · </Text>, part]))}
+          </Text>
           {toggle('expand')}
         </Box>
       )
     }
 
-    const longest = Math.max(...rows.map(row => row.label.length))
+    const shown = rows.slice(0, maxRows - 1)
     const layout: Layout =
       e.surface === 'desktop'
-        ? {
-            surface: 'desktop',
-            widthPx: Math.min(1400, Math.max(360, Math.round(bodyColumns * 7.6) - 48)),
-            labelPx: Math.min(260, Math.max(150, Math.round(longest * 8.6) + 44)),
-          }
-        : (() => {
-            const labelCells = Math.min(22, longest)
-            return { surface: 'terminal', labelCells, trackCells: Math.max(8, bodyColumns - labelCells - 13) }
-          })()
+        ? { surface: 'desktop', columns: desktopColumns(shown, Math.min(1200, Math.max(360, Math.round(bodyColumns * 7.6) - 48))) }
+        : terminalLayout(shown, bodyColumns)
 
-    const shown = rows.slice(0, maxRows - 1)
     const more = rows.length - shown.length
     const hideRow = (id: string) => () => setHidden($, list => [...list, id])
 
