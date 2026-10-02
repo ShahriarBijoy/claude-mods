@@ -15,7 +15,7 @@ const band = <S extends (typeof SURFACES)[number]>(surface: S, maxRows = 12) => 
   props: { hasSurvey: false, isWorking: false, maxRows, bodyColumns: 110, scroll: { offset: 0, bodyRows: maxRows }, view: {} },
 })
 
-type World = { usd?: number; rateLimits?: SessionRateLimit[]; ccusage?: string | Error }
+type World = { usd?: number; rateLimits?: SessionRateLimit[]; ccusage?: string | Error; below?: unknown }
 
 // The plugin's $.store, kept in a record the test can read back.
 const memoryStore = (on: On, entries: Record<string, unknown> = {}) => {
@@ -32,7 +32,8 @@ const world = (on: On, state: World = {}) => {
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('command.register', (_$, e) => ({ value: { command: e.name } }))
   // What the engine draws when the plugin passes: nothing.
-  on('ui.render', () => null as never)
+  // What the mods beneath, or the engine, drew in the band: nothing, unless a test says.
+  on('ui.render', () => (state.below ?? { type: 'engine', ref: 0 }) as never)
   on('session.usage', () => ({
     value: {
       startedAt: 0,
@@ -212,6 +213,26 @@ describe('stack', () => {
     const row = (await ui.findAll({ type: 'Box' })).find(box => box.key === 'row:session')
     expect(cellsOf(row)).toBeGreaterThan(0)
     expect(cellsOf(row)).toBeLessThanOrEqual(110 - 4)
+  })
+
+  test('a band another mod also draws in is shared: one summary line here, its drawing beneath', async ($, on) => {
+    mock.clock(on, { now: OCT_2 })
+    memoryStore(on)
+    world(on, {
+      rateLimits: [{ kind: 'five_hour', percentUsed: 19 }],
+      below: { type: 'Box', props: {}, children: [{ type: 'Text', props: {}, children: ['a game beneath'] }] },
+    })
+    await start($)
+    await command($, 'expand')
+
+    for (const surface of SURFACES) {
+      const ui = await $.ui.mount(band(surface))
+      expect(await ui.find({ type: 'Text', text: 'a game beneath' })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /5h 19%/ })).toBeDefined()
+      expect(await ui.find({ key: 'row:session' })).toBeUndefined()
+      expect(await ui.find({ key: 'toggle' })).toBeUndefined()
+      await ui.unmount()
+    }
   })
 
   test('each turn adds the cost delta to this month and the bar compares it to last month', async ($, on) => {

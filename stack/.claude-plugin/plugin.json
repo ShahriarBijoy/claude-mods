@@ -1,6 +1,6 @@
 {
   "name": "stack",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Stacked progress band above the prompt: tasks, subagents, rate limits and monthly cost",
   "author": { "name": "Shahriar" },
   "types": "./types/index.d.ts"

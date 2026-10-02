@@ -324,7 +324,11 @@ export const register: Register = on => {
     const data = await readData($)
     const hiddenIds = await read($, hidden)
     const rows = buildRows(data, now).filter(row => !isHidden(row.id, hiddenIds))
-    if (rows.length === 0) return next(e)
+    // The band is shared: what the mods beneath drew (the engine draws nothing of its own
+    // here) stays, under a one-line summary of these rows.
+    const below = await next(e)
+    if (rows.length === 0) return below
+    const isShared = below !== null && typeof below === 'object' && below.type !== 'engine'
 
     const elements: AnyElements = $.ui.resolve(e)
     const { Box, Text, Button } = elements
@@ -337,16 +341,24 @@ export const register: Register = on => {
     // band has the rows to spare.
     const gap = e.surface === 'terminal' && maxRows >= 3 ? 1 : 0
 
-    if (!(await read($, isExpanded)) || maxRows - gap < 2) {
+    if (isShared || !(await read($, isExpanded)) || maxRows - gap < 2) {
       const parts = summaryParts(rows)
-      return (
+      const summary = (
         <Box flexDirection="row" gap={1} marginTop={gap}>
           <Text color={ORANGE}>{MARK}</Text>
           <Text wrap="truncate">
             {parts.flatMap((part, index) => (index === 0 ? [part] : [<Text dimColor> · </Text>, part]))}
           </Text>
-          {toggle('expand')}
+          {!isShared && toggle('expand')}
         </Box>
+      )
+      return isShared ? (
+        <Box flexDirection="column">
+          {summary}
+          {below}
+        </Box>
+      ) : (
+        summary
       )
     }
 
