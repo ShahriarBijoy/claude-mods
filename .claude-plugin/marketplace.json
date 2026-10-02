@@ -1,0 +1,14 @@
+{
+  "name": "shahriar-mods",
+  "owner": {
+    "name": "Shahriar"
+  },
+  "description": "Claude Code mods by Shahriar",
+  "plugins": [
+    {
+      "name": "stack",
+      "source": "./stack",
+      "description": "Stacked progress band above the prompt: tasks, subagents, rate limits and monthly cost"
+    }
+  ]
+}
