@@ -9,6 +9,11 @@
       "name": "stack",
       "source": "./stack",
       "description": "Stacked progress band above the prompt: tasks, subagents, rate limits and monthly cost"
+    },
+    {
+      "name": "wartezeit",
+      "source": "./wartezeit",
+      "description": "A German vocabulary game above the prompt while Claude works, with words from the session's topic"
     }
   ]
 }

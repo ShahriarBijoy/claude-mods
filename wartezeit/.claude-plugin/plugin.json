@@ -1,0 +1,7 @@
+{
+  "name": "wartezeit",
+  "version": "0.1.0",
+  "description": "A German vocabulary game above the prompt while Claude works, with words from the session's topic",
+  "author": { "name": "Shahriar" },
+  "types": "./types/index.d.ts"
+}
